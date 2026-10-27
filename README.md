@@ -26,3 +26,6 @@ A remake of the legendary AmazingScreenshot with classic controls based on the P
 - Shift + 1–9 — select the weather with an ID from 10 to 18.
 - Ctrl + 1–4 — select the weather with an ID from 19 to 22.
 - Esc — exit screenshot mode.
+
+# Gallery 
+This plugin supports saving screenshots to the gallery for III and Vice City, just like in San Andreas, by pressing F12
