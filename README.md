@@ -6,6 +6,7 @@ A remake of the legendary AmazingScreenshot with classic controls based on the P
 # Controls
 
 - Alt + V — enable or disable screenshot mode.
+- V — switching between player and free mode.
 - W, A, S, D / arrow keys — move the camera.
 - Space / Page Up — move the camera up.
 - C / Page Down — move the camera down.
