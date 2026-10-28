@@ -3,6 +3,16 @@ A remake of the legendary AmazingScreenshot (https://gtaforums.com/topic/543523-
 
 ![Demo](screens/screen%20(1).jpg)
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=jR-IdecqhWk">
+    <img
+      src="https://img.youtube.com/vi/jR-IdecqhWk/maxresdefault.jpg"
+      alt="Watch the video"
+      width="100%"
+    >
+  </a>
+</p>
+
 # Controls
 
 - Alt + V — enable or disable screenshot mode.
