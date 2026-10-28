@@ -1,5 +1,5 @@
 # Amazing Snapshot (III/VC/SA)
-A remake of the legendary AmazingScreenshot with classic controls based on the Plugin SDK, featuring enhanced functionality while maintaining its lightweight design
+A remake of the legendary AmazingScreenshot (https://gtaforums.com/topic/543523-amazing-screenshot/) with classic controls based on the Plugin SDK, featuring enhanced functionality while maintaining its lightweight design
 
 ![Demo](screens/screen%20(1).jpg)
 
@@ -34,3 +34,6 @@ This plugin supports saving screenshots to the gallery for III and Vice City, ju
   <img src="screens/gallery2.jpg" width="32%" />
   <img src="screens/gallery3.jpg" width="32%" />
 </p>
+
+# Credits
+Big thanks to Silent (https://github.com/cookieplmonster) for the inspiration and the great tool
