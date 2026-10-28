@@ -269,15 +269,14 @@ namespace AmazingSnapshot
                 const bool plainEscape = keyEvent->vkCode == VK_ESCAPE && !controlDown && !altDown;
 
                 // Esc belongs to the game's pause menu, never to plugin exit.
-                // Keep menu input pass-through enabled until the native menu
-                // manager reports that the menu has actually closed.
+                // Forward both key edges, but do not predict the menu state here:
+                // the render callback may not run before the frontend pause begins
+                // and such a prediction could leave menu input stuck active forever.
+                // The native menu manager is the source of truth for menu activity.
                 if (plainEscape)
                 {
                     if (isDown && !wasDown)
-                    {
-                        s_bGameMenuInputActive.store(true, std::memory_order_relaxed);
                         s_bEscapeKeyUpWasForwarded.store(true, std::memory_order_relaxed);
-                    }
                     if (isDown || s_bEscapeKeyUpWasForwarded.exchange(false, std::memory_order_relaxed))
                         return CallNextHookEx(s_pKeyboardHook, code, message, data);
                 }
@@ -1404,9 +1403,9 @@ namespace AmazingSnapshot
             "Alt+" + GetKeyLabel(settings.m_nKeyModeToggle) + ": toggle mode | " +
                 GetKeyLabel(settings.m_nKeyModeToggle) + ": FREE/FOLLOW | " +
                 GetKeyLabel(settings.m_nKeyToggleTimePlayback) + ": play/pause time",
-            "Esc: open/close game menu | " + GetKeyLabel(settings.m_nKeyForward) + "/" +
+            "Move: " + GetKeyLabel(settings.m_nKeyForward) + "/" +
                 GetKeyLabel(settings.m_nKeyLeft) + "/" + GetKeyLabel(settings.m_nKeyBackward) + "/" +
-                GetKeyLabel(settings.m_nKeyRight) + " / arrows: move",
+                GetKeyLabel(settings.m_nKeyRight) + " / arrows",
             GetKeyLabel(settings.m_nKeyAscend) + " / PgUp: rise    " + GetKeyLabel(settings.m_nKeyDescend) + " / PgDn: lower",
             "Mouse: look    LMB: lock X    RMB: lock Y",
             GetKeyLabel(settings.m_nKeyMoveFast) + ": faster    " + GetKeyLabel(settings.m_nKeyMoveSlow) + ": slower",
@@ -1690,12 +1689,22 @@ namespace AmazingSnapshot
         {
             s_bNativeGameMenuObservedActive.store(true, std::memory_order_relaxed);
             s_bGameMenuInputActive.store(true, std::memory_order_relaxed);
+            return;
         }
-        else if (s_bNativeGameMenuObservedActive.exchange(false, std::memory_order_relaxed))
+
+        // Always synchronize the plugin state to the native menu state. The old
+        // implementation only cleared the flag if this callback had observed the
+        // menu active at least once. Esc used to set s_bGameMenuInputActive from
+        // the low-level hook before the frontend changed m_bMenuActive; if the game
+        // entered/exited pause between render callbacks, the native-active marker
+        // stayed false and the plugin permanently skipped camera updates.
+        const bool wasPluginMenuActive =
+            s_bGameMenuInputActive.exchange(false, std::memory_order_relaxed);
+        const bool wasNativeMenuObserved =
+            s_bNativeGameMenuObservedActive.exchange(false, std::memory_order_relaxed);
+
+        if (wasPluginMenuActive || wasNativeMenuObserved)
         {
-            // The menu really was active and the native game now reports it closed
-            // (for example, Resume selected with Enter instead of a second Esc).
-            s_bGameMenuInputActive.store(false, std::memory_order_relaxed);
             s_bEscapeKeyUpWasForwarded.store(false, std::memory_order_relaxed);
             // Drop keys held while the pause menu was active so they cannot remain
             // stuck or suppress fresh edges after Resume. The hook records new edges.

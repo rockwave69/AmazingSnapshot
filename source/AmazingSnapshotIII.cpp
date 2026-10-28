@@ -47,6 +47,7 @@ namespace
     Settings s_Settings = MakeDefaultSettings();
     InputTracker s_InputTracker;
     bool s_bNativePauseMenuWasActive = false;
+    bool s_bPauseMenuResumePending = false;
 
     CameraModeController s_CameraModeController;
     bool s_bPluginInitialized = false;
@@ -559,6 +560,8 @@ namespace
             return;
         if (!s_CameraModeController.BeginEnter())
             return;
+        s_bPauseMenuResumePending = false;
+        s_bNativePauseMenuWasActive = FrontEndMenuManager.m_bMenuActive;
 
         SaveModeState();
         CaptureCameraPose();
@@ -601,6 +604,7 @@ namespace
     {
         if (!s_CameraModeController.BeginExit(reason))
             return;
+        s_bPauseMenuResumePending = false;
 
         ModeSnapshot& snapshot = s_CameraModeController.Snapshot();
         const bool sessionTransition = snapshot.IsSessionTransition();
@@ -704,49 +708,78 @@ namespace
         return true;
     }
 
-    void ResumeScreenshotModeAfterPauseMenu()
+    bool ResumeScreenshotModeAfterPauseMenu()
     {
         if (!s_CameraModeController.IsActive())
-            return;
+            return true;
 
-        // Native pause-menu handling can replace camera ownership and clear input
-        // edges. Reacquire the configured camera mode without resetting its pose.
+        // The frontend may temporarily replace camera ownership and may expose
+        // the camera/pad in a later render tick. Keep a pending resume until both
+        // objects are available instead of losing the transition after one frame.
+        if (FrontEndMenuManager.m_bMenuActive || !TheCamera.m_pRwCamera)
+            return false;
+        CPad* pad = CPad::GetPad(0);
+        if (!pad)
+            return false;
+
+        // Drop input edges accumulated in the frontend so held menu keys cannot
+        // trigger a camera action on the first frame after Resume.
         s_InputTracker.Reset();
         s_nLastUpdateTick = GetTickCount();
-        // Release any camera ownership left by the pause frontend first. Then
-        // re-request the saved fixed pose when FREE was selected; otherwise leave
-        // the native player-follow camera in control.
+
+        // Release the frontend's camera ownership, then reacquire the mode the user
+        // had selected before opening the menu. The saved free-camera pose is kept.
         TheCamera.RestoreWithJumpCut();
         if (s_bFreeCameraEnabled)
             ActivateFixedCamera();
+        s_CameraModeController.Snapshot().MarkApplied(ModeResource::CameraOwnership);
 
         HideInterface();
-        if (CPad* pad = CPad::GetPad(0))
+        ModeSnapshot& snapshot = s_CameraModeController.Snapshot();
+        if (!snapshot.IsCaptured(ModeResource::PlayerControls))
         {
-            ModeSnapshot& snapshot = s_CameraModeController.Snapshot();
-            if (!snapshot.IsCaptured(ModeResource::PlayerControls))
-            {
-                snapshot.m_nSavedPlayerControlState = pad->DisablePlayerControls;
-                snapshot.MarkCaptured(ModeResource::PlayerControls);
-            }
-            if (pad->DisablePlayerControls != 1)
-            {
-                pad->DisablePlayerControls = 1;
-                snapshot.MarkApplied(ModeResource::PlayerControls);
-            }
+            snapshot.m_nSavedPlayerControlState = pad->DisablePlayerControls;
+            snapshot.MarkCaptured(ModeResource::PlayerControls);
+        }
+        if (pad->DisablePlayerControls != 1)
+        {
+            pad->DisablePlayerControls = 1;
+            snapshot.MarkApplied(ModeResource::PlayerControls);
         }
 
+        // Pause frontend can restore widescreen/FOV/time globals while it owns the
+        // screen. Reassert the plugin's selected values when control returns.
+        if (s_bWideScreenCurrent || TheCamera.m_bWideScreenOn)
+            SetWideScreen(s_bWideScreenCurrent);
         ApplyScreenshotFOV();
         ReassertTimeFreeze();
+        return true;
     }
 
     void UpdatePauseMenuState()
     {
         const bool menuActive = FrontEndMenuManager.m_bMenuActive;
         s_InputTracker.SetGameMenuInputActive(menuActive);
-        if (s_CameraModeController.IsActive() && s_bNativePauseMenuWasActive && !menuActive &&
+
+        if (menuActive)
+        {
+            s_bPauseMenuResumePending = false;
+        }
+        else if (s_CameraModeController.IsActive() && s_bNativePauseMenuWasActive &&
             !IsGameSessionTransitionPending())
-            ResumeScreenshotModeAfterPauseMenu();
+        {
+            // Record the close transition once. Resume can be retried on subsequent
+            // frames if the game is still rebuilding its camera or pad state.
+            s_bPauseMenuResumePending = true;
+        }
+
+        if (s_bPauseMenuResumePending)
+        {
+            if (!s_CameraModeController.IsActive() || IsGameSessionTransitionPending())
+                s_bPauseMenuResumePending = false;
+            else if (ResumeScreenshotModeAfterPauseMenu())
+                s_bPauseMenuResumePending = false;
+        }
         s_bNativePauseMenuWasActive = menuActive;
     }
 
@@ -775,7 +808,6 @@ namespace
             return;
         }
 
-        // Escape is forwarded to GTA's pause/menu. Only Alt+V exits this plugin mode.
     }
 
     void UpdateFreeCameraInput()
