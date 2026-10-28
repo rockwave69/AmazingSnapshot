@@ -550,11 +550,173 @@ namespace AmazingSnapshot
                 (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         }
 
-        bool IsExistingFile(const std::wstring& path)
+        bool IsExecutableProtection(DWORD protection)
         {
-            const DWORD attributes = GetFileAttributesW(path.c_str());
-            return attributes != INVALID_FILE_ATTRIBUTES &&
-                (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+            if ((protection & PAGE_GUARD) != 0)
+                return false;
+
+            switch (protection & 0xFFu)
+            {
+            case PAGE_EXECUTE:
+            case PAGE_EXECUTE_READ:
+            case PAGE_EXECUTE_READWRITE:
+            case PAGE_EXECUTE_WRITECOPY:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        struct GameImageInfo
+        {
+            HMODULE m_pModule = nullptr;
+            std::uintptr_t m_nLoadedBase = 0;
+            std::uintptr_t m_nPreferredBase = 0;
+            std::uintptr_t m_nImageSize = 0;
+        };
+
+        bool GetGameImageInfo(GameImageInfo& output)
+        {
+            HMODULE gameModule = GetModuleHandleW(nullptr);
+            if (!gameModule)
+                return false;
+
+            IMAGE_DOS_HEADER dosHeader{};
+            SIZE_T bytesRead = 0;
+            if (!ReadProcessMemory(GetCurrentProcess(), gameModule, &dosHeader,
+                sizeof(dosHeader), &bytesRead) || bytesRead != sizeof(dosHeader) ||
+                dosHeader.e_magic != IMAGE_DOS_SIGNATURE || dosHeader.e_lfanew <= 0)
+            {
+                return false;
+            }
+
+            // GTA III and Vice City targets are 32-bit PE executables. Read the
+            // preferred image base so signature addresses remain valid if the EXE
+            // is ever relocated by the loader.
+            IMAGE_NT_HEADERS32 ntHeaders{};
+            const auto* ntHeaderAddress = reinterpret_cast<const unsigned char*>(gameModule) + dosHeader.e_lfanew;
+            if (!ReadProcessMemory(GetCurrentProcess(), ntHeaderAddress, &ntHeaders,
+                sizeof(ntHeaders), &bytesRead) || bytesRead != sizeof(ntHeaders) ||
+                ntHeaders.Signature != IMAGE_NT_SIGNATURE ||
+                ntHeaders.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+                ntHeaders.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC ||
+                ntHeaders.OptionalHeader.SizeOfImage == 0)
+            {
+                return false;
+            }
+
+            output.m_pModule = gameModule;
+            output.m_nLoadedBase = reinterpret_cast<std::uintptr_t>(gameModule);
+            output.m_nPreferredBase = static_cast<std::uintptr_t>(ntHeaders.OptionalHeader.ImageBase);
+            output.m_nImageSize = static_cast<std::uintptr_t>(ntHeaders.OptionalHeader.SizeOfImage);
+            return true;
+        }
+
+        bool GetLoadedGameAddress(const GameImageInfo& image, std::uintptr_t preferredVirtualAddress,
+            std::uintptr_t& outputAddress)
+        {
+            if (preferredVirtualAddress < image.m_nPreferredBase)
+                return false;
+
+            const std::uintptr_t rva = preferredVirtualAddress - image.m_nPreferredBase;
+            if (rva > image.m_nImageSize || image.m_nImageSize - rva < 5u)
+                return false;
+
+            const std::uintptr_t address = image.m_nLoadedBase + rva;
+            MEMORY_BASIC_INFORMATION memoryInfo{};
+            if (VirtualQuery(reinterpret_cast<const void*>(address), &memoryInfo,
+                sizeof(memoryInfo)) != sizeof(memoryInfo) ||
+                memoryInfo.State != MEM_COMMIT || memoryInfo.Type != MEM_IMAGE ||
+                memoryInfo.AllocationBase != image.m_pModule ||
+                !IsExecutableProtection(memoryInfo.Protect))
+            {
+                return false;
+            }
+
+            outputAddress = address;
+            return true;
+        }
+
+        bool TryReadExternalBranchTarget(const GameImageInfo& image, std::uintptr_t preferredVirtualAddress,
+            std::uintptr_t& outputTarget)
+        {
+            std::uintptr_t hookAddress = 0;
+            if (!GetLoadedGameAddress(image, preferredVirtualAddress, hookAddress))
+                return false;
+
+            unsigned char jump[5] = {};
+            SIZE_T bytesRead = 0;
+            if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(hookAddress),
+                jump, sizeof(jump), &bytesRead) || bytesRead != sizeof(jump) || (jump[0] != 0xE9 && jump[0] != 0xE8))
+            {
+                return false;
+            }
+
+            std::int32_t relativeOffset = 0;
+            std::memcpy(&relativeOffset, jump + 1, sizeof(relativeOffset));
+            const std::uintptr_t target = hookAddress + sizeof(jump) +
+                static_cast<std::uintptr_t>(static_cast<std::intptr_t>(relativeOffset));
+
+            MEMORY_BASIC_INFORMATION targetInfo{};
+            if (VirtualQuery(reinterpret_cast<const void*>(target), &targetInfo,
+                sizeof(targetInfo)) != sizeof(targetInfo) ||
+                targetInfo.State != MEM_COMMIT || targetInfo.Type != MEM_IMAGE ||
+                targetInfo.AllocationBase == image.m_pModule ||
+                !IsExecutableProtection(targetInfo.Protect))
+            {
+                return false;
+            }
+
+            outputTarget = target;
+            return true;
+        }
+
+        bool DoPortableGtaHookSitesMatch(const GameImageInfo& image,
+            const std::uintptr_t* preferredHookAddresses, std::size_t hookCount)
+        {
+            if (!preferredHookAddresses || hookCount < 2)
+                return false;
+
+            std::uintptr_t expectedTarget = 0;
+            for (std::size_t index = 0; index < hookCount; ++index)
+            {
+                std::uintptr_t target = 0;
+                if (!TryReadExternalBranchTarget(image, preferredHookAddresses[index], target))
+                    return false;
+
+                if (index == 0)
+                    expectedTarget = target;
+                else if (target != expectedTarget)
+                    return false;
+            }
+            return true;
+        }
+
+        bool IsPortableGtaRedirectActive()
+        {
+            GameImageInfo image{};
+            if (!GetGameImageInfo(image))
+                return false;
+
+            // PortableGTA's published source patches these call sites to the same
+            // getUserFilesDir() function. Sites may use CALL rel32 (E8) or JMP rel32 (E9). This behavior-based signature does not
+            // depend on whether the ASI/DLL has been renamed. It also avoids a false
+            // positive when a file is present but never loaded by the ASI loader.
+            // Addresses are the GTA III 1.0 US / Vice City 1.0 US sites documented
+            // by portablegta.cpp (GTAmodding/miscmods).
+            static const std::uintptr_t gtaIIIHookSites[] =
+            {
+                0x479080u, 0x5811DDu, 0x591EDDu
+            };
+            static const std::uintptr_t viceCityHookSites[] =
+            {
+                0x48E020u, 0x61D8CAu
+            };
+
+            return DoPortableGtaHookSitesMatch(image, gtaIIIHookSites,
+                       sizeof(gtaIIIHookSites) / sizeof(gtaIIIHookSites[0])) ||
+                DoPortableGtaHookSitesMatch(image, viceCityHookSites,
+                       sizeof(viceCityHookSites) / sizeof(viceCityHookSites[0]));
         }
 
         bool GetGameExecutableDirectory(std::wstring& outputDirectory)
@@ -575,30 +737,6 @@ namespace AmazingSnapshot
             outputDirectory.assign(executablePath);
             return !outputDirectory.empty();
         }
-
-        bool IsPortableGtaInstalled(const std::wstring& gameDirectory)
-        {
-            // Prefer checking the loaded module. This still works if the loader
-            // loads Portable GTA from a non-default directory.
-            if (GetModuleHandleW(L"portablegta.asi") || GetModuleHandleW(L"portablegta.dll"))
-                return true;
-
-            // Common installations place portablegta.asi in the game's scripts
-            // directory. Also check the game root for ASI loaders configured that way.
-            // portablegta.cpp builds its userfiles path from the game EXE directory.
-            const wchar_t* relativeCandidates[] =
-            {
-                L"\\scripts\\portablegta.asi",
-                L"\\portablegta.asi"
-            };
-            for (const wchar_t* relativePath : relativeCandidates)
-            {
-                if (IsExistingFile(gameDirectory + relativePath))
-                    return true;
-            }
-            return false;
-        }
-
         bool GetPortableGalleryPath(const std::wstring& gameDirectory, std::wstring& outputGalleryPath)
         {
             const std::wstring userFilesPath = gameDirectory + L"\\userfiles";
@@ -633,7 +771,7 @@ namespace AmazingSnapshot
         {
             std::wstring gameDirectory;
             std::wstring galleryPath;
-            if (GetGameExecutableDirectory(gameDirectory) && IsPortableGtaInstalled(gameDirectory))
+            if (GetGameExecutableDirectory(gameDirectory) && IsPortableGtaRedirectActive())
             {
                 // Portable GTA redirects game user files to <game root>\\userfiles.
                 // Keep screenshots in the same per-installation tree so portable
