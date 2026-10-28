@@ -1,4 +1,4 @@
-# AmazingSnapshot (III/VC/SA)
+# Amazing Snapshot (III/VC/SA)
 A remake of the legendary AmazingScreenshot with classic controls based on the Plugin SDK, featuring enhanced functionality while maintaining its lightweight design
 
 ![Demo](screens/screen%20(1).jpg)
@@ -29,3 +29,8 @@ A remake of the legendary AmazingScreenshot with classic controls based on the P
 
 # Gallery 
 This plugin supports saving screenshots to the gallery for III and Vice City, just like in San Andreas, by pressing F12
+<p float="left">
+  <img src="screens/gallery1.jpg" width="32%" />
+  <img src="screens/gallery2.jpg" width="32%" />
+  <img src="screens/gallery3.jpg" width="32%" />
+</p>
